@@ -1,0 +1,202 @@
+%% This function 
+% 1- reads the data to create database, 
+% 2- creates sequenced 16-metrics, 
+% 3- separates the data into 3 sets, 
+% 4- normalizes (z-score) the data based on the training set mean and standard deviation,
+% 5- labels the data with the expertise level (1:expert, -1:novice)
+
+clearvars -except net Database
+MetricNames = ['Expertise', {'Aspirator Force'}, 'Bipolar Force', 'Tip Distance', 'Blood Emitted', 'Blood Current', 'Total Blood Loss', 'X-Aspirator', 'Y-Aspirator', 'Z-Aspirator', 'X-Bipolar', 'Y-Bipolar', 'Z-Bipolar', 'Force Change Aspirator', 'Force Change Bipolar',...
+    'Aspirator Velocity', 'Bipolar Velocity', 'Tip Distance Change', 'Tumor Volume Removed', 'Healthy Tissue Removed', 'Change Blood Emitted', 'Change Blood Pooling', ...
+    'Acceleration Aspirator', 'Acceleration Bipolar', 'Jerk Aspirator', 'Jerk Bipolar'];
+
+%% CREATE DATABASE
+cd 'D:\NeuroSim\Subpial Resection\Data\core_data'   %File directory
+subfolders = dir;
+subfolders = {subfolders.name};
+N = 1;
+
+if ~exist('Database', 'var')
+    for P = 3:length(subfolders)           %% AT A SUBFOLDER (PER PERSON)
+        subfolder = char(subfolders(P));
+        cd(subfolder)
+        filename = dir('*.mat');
+        fprintf('%s', subfolder(1:end-3));
+        
+        for request = 1:length(filename)        %% IN A TRIAL
+            
+            if strfind(filename(request).name, 'SubpialResection102')
+                load(filename(request).name);
+                
+                Database(N).person = {[subfolder ' -' num2str(request)]};
+                Database(N).filename = {filename(request).name};
+                Database(N).trialtype = 'realistic';       
+                Database(N).core = core;
+                N = N+1;
+            elseif strfind(filename(request).name, 'SubPialResection101')
+                load(filename(request).name);
+                 
+                Database(N).person = {[subfolder ' -' num2str(request)]};
+                Database(N).filename = {filename(request).name}; 
+                Database(N).trialtype = 'practice';
+                Database(N).core = core;
+                N = N+1;
+            end           
+        end
+        cd ..
+    end
+end
+fprintf('\n');
+clearvars -except net Database AllNames
+format long
+ToNormalize = [];
+TogGetNormalizationValues = [];
+SizeRecording = [];
+IndividualsID = [];
+
+%%
+cd 'D:\NeuroSim\Subpial Resection\Data\core_data'
+
+for P = 1:length(Database)
+    %fprintf('%g', P);
+    core = Database(P).core;
+    Variables = core.Properties.VariableNames;
+    
+    %% M E T R I C S
+    %% FIRST DATA
+    
+    if strcmp(Database(P).trialtype, 'realistic')    % ***** scenario specific *****  tumor tissue
+        TumorVolume = core.Volume_ofLabel2_Girallesion;
+    elseif strcmp(Database(P).trialtype, 'practice')
+        TumorVolume = core.Volume_ofLabel3_target;
+    end
+    
+    VolumeData = table2array(core(:,contains(Variables, "Volume")));
+    VolumeData = [TumorVolume sum(VolumeData,2) - TumorVolume];
+    BloodData = table2array(core(:,contains(Variables, "Blood")));
+    bloodframe = [0; diff(core.BloodCurrentFrame)];
+    
+    if contains(core.InstrumentRightHand(1), 'CUSA')    % ***** scenario specific *****  dominant hand instrument
+        Translation = [table2array(core(:,contains(Variables, "TranslationRight"))) table2array(core(:,contains(Variables, "TranslationLeft")))];
+        Forces =  [core.ForceFeedbackRightHand core.ForceFeedbackLeftHand];
+        forcecusa = core.ForceFeedbackRightHand;
+        forcebipolar = core.ForceFeedbackLeftHand;
+    elseif contains(core.InstrumentRightHand(1), 'Bipolar')
+        Translation = [table2array(core(:,contains(Variables, "TranslationLeft"))) table2array(core(:,contains(Variables, "TranslationRight")))];
+        Forces =  [core.ForceFeedbackLeftHand core.ForceFeedbackRightHand];
+        forcebipolar = core.ForceFeedbackRightHand;
+        forcecusa = core.ForceFeedbackLeftHand;
+    end
+    
+    % non derivatives
+    TipDistance = [core.TranslationRight_x-core.TranslationLeft_x core.TranslationRight_y-core.TranslationLeft_y core.TranslationRight_z-core.TranslationLeft_z];
+    TipDistance3D = sqrt(TipDistance(:,1).^2 + TipDistance(:,2).^2 + TipDistance(:,3).^2);
+    
+    % VolumeData;    %TUMOR PERCENTAGE REMOVED   %HAVE JUST TWO LABELS WHICH ARE TUMOUR AND HEALTHY TISSUE
+    % BloodData;     %TOTAL BLOOD LOSS
+    
+    % 1st derivatives
+    ConForces = abs(diff(Forces));
+    Velocity = diff(Translation);          
+    Velocity3D = [sqrt(Velocity(:,1).^2 + Velocity(:,2).^2 + Velocity(:,3).^2) sqrt(Velocity(:,4).^2 + Velocity(:,5).^2 + Velocity(:,6).^2)];
+    
+    ConTipDistance3D = diff(TipDistance3D);
+    VolumeDr = diff(VolumeData);
+    BloodPoolChange = BloodData(:,2);                BloodPoolChange = diff(BloodPoolChange);
+    
+    Acceleration3D = diff(Velocity3D);
+    ConAcceleration3D = abs(diff(Acceleration3D));
+    
+    Acceleration3D = abs(Acceleration3D);
+    ConTipDistance3D = abs(ConTipDistance3D);
+    
+    % CONDITION 0
+    AllNONDR = [Forces TipDistance3D BloodData];                                        AllNONDR([1 end], :) = [];    %AllNONDR([1 2 end], :) = [];      %Translation
+    All1st = [ConForces Velocity3D ConTipDistance3D VolumeDr BloodPoolChange];      All1st(1, :) = [];              %All1st([1 end], :) = [];     
+    All2nd = Acceleration3D;                                                        %All2nd(1,:) = [];              %ConAcceleration3D
+    All3rd = [];
+    
+   %% 
+AllNames = ['Expertise', ...
+        {'Aspirator Force'}, 'Bipolar Force', 'Tip Distance', 'Blood Emitted', 'Blood Pool', 'Total Blood Loss',...
+        'Force Change Aspirator', 'Force Change Bipolar', 'Aspirator Velocity', 'Bipolar Velocity', 'Tip Distance Change', 'Tumor Volume Removed', 'Healthy Tissue Removed', 'Blood Pooling Change', ...
+        'Aspirator Acceleration', 'Bipolar Acceleration'];
+    %%
+    AllData = [AllNONDR All1st All2nd All3rd]';
+    % AllData = [BloodData, Forces, VolumeData(:,2)]';   %Safety metrics
+            
+    %% GET AVERAGE FOR EACH TIME PERIOD
+    TimePeriod = 10;        % 10 = 0.2 seconds, 25 = half a second
+    Sequenced = zeros(size(AllData,1),floor(size(AllData,2)/TimePeriod));   Sequenced(:,:) = NaN;
+    for R = 1:length(AllData)/TimePeriod
+        Sequenced(:,R) = mean(AllData(:,TimePeriod*(R-1)+1:TimePeriod*(R)),2);
+    end
+    
+    %% PUT ALL DATA TOGETHER BEFORE NORMALIZATION
+    % A11, A6, D12, D7 Testing; A3, A12, D1, D10 Validation   + Testing B7, B12, C5, C8  PREVIOUSLY DETERMINED RANDOM DATA FOR TESTING AND VALIDATION 
+    testingindexes = [13:18 60:65 246:251 282:287];   
+    validationindexes = [43:48 19:24 228:233 234:239];
+
+    if strncmp(Database(P).person,'A',1) || strncmp(Database(P).person,'D',1)    % TO GET NORMALIZATION VALUES (SD AND MEAN) IN EITHER WAY NORMALIZATION SHOULD HAPPEN WITH NEUROSURGEONS AND MEDICAL STUDENTS' VALUES   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        % ADD THE GROUPS' ROW
+        if strncmp(Database(P).person,'A',1)
+            Sequenced = [ones(1,size(Sequenced,2)); Sequenced];
+        elseif strncmp(Database(P).person,'D',1)
+            Sequenced = [zeros(1,size(Sequenced,2)); Sequenced];
+        end
+        if ~ismember(P,[testingindexes validationindexes]) 
+%                 ([3 11 8 4 42 39 40])     %'A11' 'A6' 'A3' 'A12', 'D12' 'D7' 'D1' 'D10'])   % only trainingdata will be used to get the mean and variation
+            TogGetNormalizationValues = [TogGetNormalizationValues Sequenced];
+        end
+    end
+    
+    if strncmp(Database(P).person,'C',1) || strncmp(Database(P).person,'B',1)   % SENIORS AND JUNIORS ARE NOT INCLUDED IN NORMALIZATION, SO THIS WONT MAKE ANY DIFFERENCE
+        Sequenced = [ones(1,size(Sequenced,2)); Sequenced];
+    end
+    
+    %             if strncmp(Database(P).person,'A',1) || strncmp(Database(P).person,'D',1)        % PICK ONLY NEUROSURGEONS AND MEDICAL STUDENTS   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ToNormalize = [ToNormalize Sequenced];
+    SizeRecording = [SizeRecording length(Sequenced)];
+    IndividualsID = [IndividualsID P];
+    %             end
+    
+    clearvars -except net TogGetNormalizationValues IndividualsID testingindexes validationindexes SizeRecording ToNormalize Database AllNames realistic practice P subfolder subfolders request filename FinalData
+end
+
+%% NORMALIZE and SEPARATE THE DATA AGAIN
+% ToNormalize = normalize(ToNormalize,2);
+metrics_mean = mean(TogGetNormalizationValues');
+metrics_std = std(TogGetNormalizationValues');
+
+Normalized = ((ToNormalize'-metrics_mean)./metrics_std)';
+SizeRecording = [0 cumsum(SizeRecording)];
+
+for R = 1:length(IndividualsID)
+    FinalDataAct(R,:) = [{Database(IndividualsID(R)).person} {ToNormalize(:,SizeRecording(R)+1:SizeRecording(R+1))}];
+    FinalData(R,:) = [{Database(IndividualsID(R)).person} {Normalized(:,SizeRecording(R)+1:SizeRecording(R+1))}];
+end
+
+clear ToNormalize Normalized TogGetNormalizationValues P R
+
+%% MAKE THE ::::::EXPERTISE:::::: 1 AND -1 FOR NS AND MS RESPECTIVELY
+for R = 1:length(IndividualsID)
+    T = FinalData{R,2};
+    if strncmp(Database(R).person,'D',1)
+        T(1,:) = -1;
+    else
+        T(1,:) = 1;
+    end
+    FinalData{R,2} = T;
+end
+
+%% SORT THE DATA
+for R = 1:size(FinalData,1)
+    Lengths(R) = size(FinalData{R,2},2);
+end
+[Lengths,idx] = sort(Lengths);  % Sort the data by sequence length.  
+FinalData = FinalData(idx,:);           % 13:18 60:65 43:48 19:24 246:251 228:233 234:239])  'A11' 'A6' 'A3' 'A12', 'D12' 'D1' 'D10'
+FinalDataAct = FinalDataAct(idx,:);     % A11, A6, D12, D7 Testing; A3, A12, D1, D10 Validation
+
+% determine testing and validation indexes
+[~,testingindexes] = ismember(testingindexes,idx);            testingindexes(testingindexes==0) = [];
+[~,validationindexes] = ismember(validationindexes,idx);     validationindexes(validationindexes==0) = [];
