@@ -1,4 +1,4 @@
-%% This function includes the parameters the train the LSTM network
+%% This function includes the parameters to train the LSTM network
 
 layers = [sequenceInputLayer(mnumber)
     lstmLayer(mnumber+1,'OutputMode','sequence') 
